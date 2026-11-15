@@ -10,7 +10,7 @@ In production, we'll use [elixir-nodejs](https://github.com/revelrylabs/elixir-n
 
 ## Steps
 
-0. install nodejs (I recommend [mise](https://mise.jdx.dev/))
+0. Install Node.js. The provided Vite 8 configuration requires Node.js 20.19+ or 22.12+. See the [Vite 8 release notes](https://vite.dev/blog/announcing-vite8.html#node-js-support) for supported versions.
 
 1. Add `live_react` to your list of dependencies in `mix.exs` and run `mix deps.get`
 
@@ -272,7 +272,7 @@ and add these scripts used by watcher and `mix assets.build` command
   "scripts": {
     "dev": "vite --host -l warn",
     "build": "tsc && vite build",
-    "build-server": "tsc && vite build --ssr js/server.js --out-dir ../priv/react-components --minify esbuild && echo '{\"type\": \"module\" } ' > ../priv/react-components/package.json"
+    "build-server": "tsc && vite build --ssr js/server.js --out-dir ../priv/react-components --minify && echo '{\"type\": \"module\" } ' > ../priv/react-components/package.json"
   }
 }
 ```

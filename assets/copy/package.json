@@ -4,24 +4,24 @@
   "scripts": {
     "dev": "vite --host -l warn",
     "build": "tsc && vite build",
-    "build-server": "tsc && vite build --ssr js/server.js --out-dir ../priv/react-components --minify esbuild && echo '{\"type\": \"module\" } ' > ../priv/react-components/package.json"
+    "build-server": "tsc && vite build --ssr js/server.js --out-dir ../priv/react-components --minify && echo '{\"type\": \"module\" } ' > ../priv/react-components/package.json"
   },
   "devDependencies": {
-    "@tailwindcss/forms": "^0.5.10",
-    "@tailwindcss/vite": "^4.1.17",
-    "@types/react": "^18.3.23",
-    "@types/react-dom": "^18.3.7",
-    "@vitejs/plugin-react": "^4.5.2",
-    "typescript": "^5.8.3",
-    "vite": "^7.2.7"
+    "@tailwindcss/forms": "^0.5.11",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8"
   },
   "dependencies": {
     "live_react": "file:../deps/live_react",
     "phoenix": "file:../deps/phoenix",
     "phoenix_html": "file:../deps/phoenix_html",
     "phoenix_live_view": "file:../deps/phoenix_live_view",
-    "topbar": "^3.0.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "topbar": "^3.0.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   }
 }
