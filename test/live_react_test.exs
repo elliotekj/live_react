@@ -103,6 +103,74 @@ defmodule LiveReactTest do
   end
 
   describe "SSR behavior" do
+    defmodule EmptySSR do
+      def render(_, _, _), do: ""
+    end
+
+    test "only marks the component as server-rendered when a renderer ran" do
+      previous = Application.fetch_env(:live_react, :ssr_module)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, module} -> Application.put_env(:live_react, :ssr_module, module)
+          :error -> Application.delete_env(:live_react, :ssr_module)
+        end
+      end)
+
+      render = fn ->
+        LiveReact.react(%{name: "MyComponent", __changed__: nil})
+        |> Phoenix.HTML.Safe.to_iodata()
+        |> IO.iodata_to_binary()
+        |> Test.get_react()
+      end
+
+      Application.delete_env(:live_react, :ssr_module)
+      refute render.().ssr
+
+      Application.put_env(:live_react, :ssr_module, EmptySSR)
+      assert render.().ssr
+    end
+
+    defmodule CountedProp do
+      defstruct [:id]
+    end
+
+    defimpl LiveReact.Encoder, for: CountedProp do
+      def encode(item, _opts) do
+        count = Process.get(:prop_encoding_count, 0) + 1
+        Process.put(:prop_encoding_count, count)
+        %{id: item.id, token: count}
+      end
+    end
+
+    defmodule CaptureSSR do
+      def render(_, props, _) do
+        send(self(), {:ssr_props, props})
+        "<div>ok</div>"
+      end
+    end
+
+    test "server and browser receive the same encoded props" do
+      previous = Application.get_env(:live_react, :ssr_module)
+      Application.put_env(:live_react, :ssr_module, CaptureSSR)
+      on_exit(fn -> Application.put_env(:live_react, :ssr_module, previous) end)
+      Process.put(:prop_encoding_count, 0)
+
+      react =
+        LiveReact.react(%{name: "MyComponent", item: %CountedProp{id: 1}, __changed__: nil})
+        |> Phoenix.HTML.Safe.to_iodata()
+        |> IO.iodata_to_binary()
+        |> Test.get_react()
+
+      assert_received {:ssr_props, %{item: %{token: token}}}
+      assert react.props["item"]["token"] == token
+      assert Process.get(:prop_encoding_count) == 1
+    end
+
+    defmodule FailingSSR do
+      def render(_, _, _), do: {:error, "Unexpected Vite SSR response: 413 Payload Too Large"}
+    end
+
     def ssr_component(assigns) do
       ~H"""
       <.react name="MyComponent" ssr={false} />
@@ -114,6 +182,19 @@ defmodule LiveReactTest do
       react = Test.get_react(html)
 
       assert react.ssr == false
+    end
+
+    test "reports the renderer error instead of treating it as HTML" do
+      previous = Application.get_env(:live_react, :ssr_module)
+      Application.put_env(:live_react, :ssr_module, FailingSSR)
+      on_exit(fn -> Application.put_env(:live_react, :ssr_module, previous) end)
+
+      assert_raise RuntimeError,
+                   "LiveReact SSR failed: Unexpected Vite SSR response: 413 Payload Too Large",
+                   fn ->
+                     LiveReact.react(%{name: "MyComponent", __changed__: nil})
+                     |> Phoenix.HTML.Safe.to_iodata()
+                   end
     end
   end
 

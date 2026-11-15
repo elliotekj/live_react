@@ -86,9 +86,44 @@ defimpl LiveReact.Encoder, for: Map do
   end
 end
 
+defmodule LiveReact.Encoder.JSONKeys do
+  @moduledoc false
+
+  def validate!(value) when is_map(value) do
+    _ =
+      Enum.reduce(value, MapSet.new(), fn {key, child}, seen ->
+        name = if is_atom(key), do: Atom.to_string(key), else: to_string(key)
+
+        if MapSet.member?(seen, name) do
+          raise ArgumentError, "ambiguous JSON object key #{inspect(name)}"
+        end
+
+        validate!(child)
+        MapSet.put(seen, name)
+      end)
+
+    value
+  end
+
+  def validate!(value) when is_list(value) do
+    Enum.each(value, &validate!/1)
+    value
+  end
+
+  def validate!(value), do: value
+end
+
 defimpl LiveReact.Encoder, for: [Date, Time, NaiveDateTime, DateTime] do
   def encode(value, _opts) do
     @for.to_iso8601(value)
+  end
+end
+
+if Code.ensure_loaded?(Ecto.Association.NotLoaded) do
+  defimpl LiveReact.Encoder, for: Ecto.Association.NotLoaded do
+    def encode(value, opts) do
+      if opts[:nilify_not_loaded], do: nil, else: LiveReact.Encoder.Any.encode(value, opts)
+    end
   end
 end
 
@@ -190,9 +225,26 @@ defimpl LiveReact.Encoder, for: Phoenix.LiveView.AsyncResult do
     )
   end
 
-  defp encode_failed({:error, reason}), do: reason
-  defp encode_failed({:exit, reason}), do: reason
-  defp encode_failed(other), do: other
+  defp encode_failed({:error, reason}), do: safe_user_reason(reason)
+  defp encode_failed({:exit, _reason}), do: "async operation failed"
+  defp encode_failed(other), do: safe_user_reason(other)
+
+  defp safe_user_reason(reason) do
+    if json_value?(reason), do: reason, else: "async operation failed"
+  end
+
+  defp json_value?(value) when is_binary(value), do: String.valid?(value)
+  defp json_value?(value) when is_number(value) or is_atom(value), do: true
+  defp json_value?([]), do: true
+  defp json_value?([head | tail]), do: json_value?(head) and json_value?(tail)
+
+  defp json_value?(value) when is_map(value) and not is_struct(value) do
+    Enum.all?(value, fn {key, child} ->
+      (is_atom(key) or (is_binary(key) and String.valid?(key))) and json_value?(child)
+    end)
+  end
+
+  defp json_value?(_value), do: false
 end
 
 defimpl LiveReact.Encoder, for: Phoenix.LiveView.UploadConfig do
@@ -244,6 +296,8 @@ end
 
 defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
   def encode(%Phoenix.HTML.Form{} = form, opts) do
+    opts = Keyword.put_new(opts, :nilify_not_loaded, true)
+
     LiveReact.Encoder.encode(
       %{
         name: form.name,
@@ -256,7 +310,7 @@ defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
   end
 
   defp get_form_validity(%{source: %{valid?: valid}}), do: valid
-  defp get_form_validity(_), do: true
+  defp get_form_validity(%{errors: errors}), do: errors == []
 
   if Code.ensure_loaded?(Ecto) do
     @relations [:embed, :assoc]
@@ -290,7 +344,7 @@ defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
       case Map.fetch(source.changes, field) do
         {:ok, changesets} ->
           changesets
-          |> Enum.filter(&(&1.params != nil))
+          |> Enum.reject(&(&1.action in [:replace, :delete]))
           |> Enum.map(&collect_changeset_values(&1, opts))
 
         :error ->
@@ -299,7 +353,11 @@ defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
     end
 
     defp get_field_value(source, field, _type, _opts) do
-      Phoenix.HTML.FormData.Ecto.Changeset.input_value(source, %{params: source.params}, field)
+      Phoenix.HTML.FormData.Ecto.Changeset.input_value(
+        source,
+        %{params: source.params || %{}},
+        field
+      )
     end
 
     defp data_field_value(%Ecto.Association.NotLoaded{} = not_loaded, opts) do
@@ -335,6 +393,8 @@ defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
   end
 
   if Code.ensure_loaded?(Ecto) do
+    defp collect_changeset_errors(nil), do: %{}
+
     defp collect_changeset_errors(%Ecto.Changeset{} = changeset) do
       errors = translate_errors(changeset.errors)
 
@@ -353,7 +413,7 @@ defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
          when tag in @relations do
       list_errors =
         value
-        |> Enum.filter(&(&1.params != nil))
+        |> Enum.reject(&(&1.action in [:replace, :delete]))
         |> Enum.map(&nilify_empty_errors/1)
 
       if Enum.all?(list_errors, &is_nil/1), do: acc, else: Map.put(acc, field, list_errors)
@@ -378,8 +438,9 @@ defimpl LiveReact.Encoder, for: Phoenix.HTML.Form do
   end
 
   defp translate_errors(errors) do
-    Map.new(errors, fn {field, error} ->
-      {field, error |> List.wrap() |> Enum.map(&translate_error/1)}
+    Enum.reduce(errors, %{}, fn {field, error}, result ->
+      messages = error |> List.wrap() |> Enum.map(&translate_error/1)
+      Map.update(result, field, messages, &(&1 ++ messages))
     end)
   end
 

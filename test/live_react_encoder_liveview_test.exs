@@ -30,6 +30,49 @@ defmodule LiveReact.Encoder.LiveViewTest do
       assert encoded.ok == false
       assert encoded.failed == "boom"
     end
+
+    test "preserves structured JSON error details and hides non-JSON terms" do
+      reason = %{code: "offline", retryable: false, details: ["network"]}
+      result = AsyncResult.loading() |> AsyncResult.failed({:error, reason})
+      assert Encoder.encode(result, []).failed == reason
+
+      result = AsyncResult.loading() |> AsyncResult.failed(reason)
+      assert Encoder.encode(result, []).failed == reason
+
+      result =
+        AsyncResult.loading() |> AsyncResult.failed({:error, %{reason: {:private, "secret"}}})
+
+      assert Encoder.encode(result, []).failed == "async operation failed"
+    end
+
+    test "renders complex async failures without leaking internal details" do
+      result = AsyncResult.loading() |> AsyncResult.failed({:exit, {:badmatch, "private"}})
+
+      html =
+        LiveReact.react(%{name: "Demo", result: result, __changed__: nil, ssr: false})
+        |> Phoenix.HTML.Safe.to_iodata()
+        |> IO.iodata_to_binary()
+
+      assert LiveReact.Test.get_react(html).props["result"]["failed"] == "async operation failed"
+      refute html =~ "private"
+    end
+
+    test "does not expose task exit reasons in rendered props" do
+      for reason <- ["api-token-PRIVATE", :private_exit, {:error, "PRIVATE"}] do
+        result = AsyncResult.loading() |> AsyncResult.failed({:exit, reason})
+
+        html =
+          LiveReact.react(%{name: "Demo", result: result, __changed__: nil, ssr: false})
+          |> Phoenix.HTML.Safe.to_iodata()
+          |> IO.iodata_to_binary()
+
+        assert LiveReact.Test.get_react(html).props["result"]["failed"] ==
+                 "async operation failed"
+
+        refute html =~ "PRIVATE"
+        refute html =~ "private_exit"
+      end
+    end
   end
 
   describe "UploadEntry / UploadConfig" do

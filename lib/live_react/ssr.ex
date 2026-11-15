@@ -30,11 +30,11 @@ defmodule LiveReact.SSR do
 
   @callback render(component_name, props, slots) :: render_response | no_return
 
-  @spec render(component_name, props, slots) :: render_response | no_return
+  @spec render(component_name, props, slots) :: render_response | nil | no_return
   def render(name, props, slots) do
     case Application.get_env(:live_react, :ssr_module, nil) do
       nil ->
-        %{preloadLinks: "", html: ""}
+        nil
 
       mod ->
         meta = %{component: name, props: props, slots: slots}
@@ -52,6 +52,8 @@ defmodule LiveReact.SSR do
       [html] -> %{preloadLinks: "", html: html}
     end
   end
+
+  defp parse_render_body({:error, reason}), do: raise("LiveReact SSR failed: #{reason}")
 
   defp parse_render_body(body), do: body
 end

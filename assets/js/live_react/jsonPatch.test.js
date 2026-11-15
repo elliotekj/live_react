@@ -27,9 +27,41 @@ describe("getValueByPointer", () => {
   it("gets a nested property", () => {
     expect(getValueByPointer(testDoc, "/nested/key")).toBe("value");
   });
+
+  it("reads own JSON keys but not inherited properties", () => {
+    const doc = JSON.parse('{"__proto__":{"constructor":{"prototype":1}}}');
+    expect(getValueByPointer(doc, "/__proto__/constructor/prototype")).toBe(1);
+    expect(getValueByPointer({}, "/__proto__")).toBeUndefined();
+    expect(getValueByPointer({}, "/constructor/prototype")).toBeUndefined();
+  });
 });
 
 describe("applyOperation", () => {
+  it("stores __proto__ as an own key without changing the prototype", () => {
+    const doc = {};
+    applyOperation(doc, {
+      op: "add",
+      path: "/__proto__",
+      value: { isAdmin: true },
+    });
+    expect(Object.getPrototypeOf(doc)).toBe(Object.prototype);
+    expect(Object.hasOwn(doc, "__proto__")).toBe(true);
+    expect(JSON.stringify(doc)).toBe('{"__proto__":{"isAdmin":true}}');
+    expect(doc.isAdmin).toBeUndefined();
+  });
+
+  it("does not traverse inherited prototype paths", () => {
+    const doc = {};
+    applyOperation(doc, { op: "add", path: "/__proto__/isAdmin", value: true });
+    applyOperation(doc, {
+      op: "add",
+      path: "/constructor/prototype/isAdmin",
+      value: true,
+    });
+    expect(doc.isAdmin).toBeUndefined();
+    expect(Object.prototype.isAdmin).toBeUndefined();
+  });
+
   it("adds a property to an object", () => {
     const doc = { foo: "bar" };
     applyOperation(doc, { op: "add", path: "/baz", value: "qux" });
@@ -117,6 +149,120 @@ describe("applyOperation", () => {
 });
 
 describe("applyPatch copy-on-write", () => {
+  it("preserves earlier items when removal shifts an array index", () => {
+    const first = { v: 1 };
+    const second = { v: 2 };
+    const doc = { items: [first, second] };
+
+    applyPatch(doc, [
+      { op: "replace", path: "/items/0/v", value: 3 },
+      { op: "remove", path: "/items/0" },
+      { op: "replace", path: "/items/0/v", value: 4 },
+    ]);
+
+    expect(doc.items).toEqual([{ v: 4 }]);
+    expect(first).toEqual({ v: 1 });
+    expect(second).toEqual({ v: 2 });
+  });
+
+  it.each([
+    [
+      "insertion",
+      { op: "add", path: "/items/0", value: { v: 0 } },
+      "/items/1/v",
+    ],
+    [
+      "upsert",
+      { op: "upsert", path: "/items/0", value: { __dom_id: "new", v: 0 } },
+      "/items/1/v",
+    ],
+    [
+      "negative limit",
+      { op: "limit", path: "/items", value: -1 },
+      "/items/0/v",
+    ],
+  ])("preserves shifted items after %s", (_name, change, target) => {
+    const first = { v: 1 };
+    const second = { v: 2 };
+    const doc = { items: [first, second] };
+    applyPatch(doc, [
+      { op: "replace", path: target, value: 3 },
+      change,
+      { op: "replace", path: target, value: 4 },
+    ]);
+    expect(first).toEqual({ v: 1 });
+    expect(second).toEqual({ v: 2 });
+    expect(target === "/items/1/v" ? doc.items[1].v : doc.items[0].v).toBe(4);
+  });
+
+  it("preserves a replacement value when updating its descendants", () => {
+    const replacement = { v: 2 };
+    const doc = { item: { v: 1 } };
+    applyPatch(doc, [
+      { op: "replace", path: "/item/v", value: 3 },
+      { op: "replace", path: "/item", value: replacement },
+      { op: "replace", path: "/item/v", value: 4 },
+    ]);
+    expect(doc.item).toEqual({ v: 4 });
+    expect(replacement).toEqual({ v: 2 });
+  });
+
+  it("updates own prototype-named keys without mutating their original values", () => {
+    const original = JSON.parse(
+      '{"profile":{"__proto__":{"constructor":{"prototype":{"isAdmin":false}}}}}',
+    );
+    const previousProfile = original.profile;
+    const result = applyPatch(original, [
+      {
+        op: "replace",
+        path: "/profile/__proto__/constructor/prototype/isAdmin",
+        value: true,
+      },
+    ]);
+    expect(result.profile.__proto__.constructor.prototype.isAdmin).toBe(true);
+    expect(previousProfile.__proto__.constructor.prototype.isAdmin).toBe(false);
+    expect(Object.getPrototypeOf(result.profile)).toBe(Object.prototype);
+    expect(Object.prototype.isAdmin).toBeUndefined();
+  });
+
+  it("ignores inherited paths without creating prototype-derived values", () => {
+    const doc = { profile: {} };
+    applyPatch(doc, [
+      { op: "add", path: "/profile/__proto__/isAdmin", value: true },
+    ]);
+    expect(doc.profile).toEqual({});
+    expect(Object.getPrototypeOf(doc.profile)).toBe(Object.prototype);
+    expect(doc.profile.isAdmin).toBeUndefined();
+  });
+
+  it("supports escaped path segments without reusing another path's clone", () => {
+    const nested = { b: { value: 1 } };
+    const escaped = { value: 1 };
+    const doc = { a: nested, "a/b": escaped };
+    applyPatch(doc, [
+      { op: "replace", path: "/a/b/value", value: 2 },
+      { op: "replace", path: "/a~1b/value", value: 3 },
+    ]);
+    expect(doc.a.b.value).toBe(2);
+    expect(doc["a/b"].value).toBe(3);
+    expect(nested.b.value).toBe(1);
+    expect(escaped.value).toBe(1);
+  });
+
+  it("isolates nested limits and updates after a root replacement", () => {
+    const oldRows = [1, 2, 3];
+    const replacementRows = [4, 5, 6];
+    const replacement = { data: { rows: replacementRows } };
+    const result = applyPatch({ data: { rows: oldRows } }, [
+      { op: "limit", path: "/data/rows", value: 1 },
+      { op: "replace", path: "", value: replacement },
+      { op: "limit", path: "/data/rows", value: 2 },
+    ]);
+    expect(oldRows).toEqual([1, 2, 3]);
+    expect(replacementRows).toEqual([4, 5, 6]);
+    expect(result.data.rows).toEqual([4, 5]);
+  });
+
   it("gives a fresh array reference for a touched top-level key", () => {
     const original = { users: [{ __dom_id: "a", name: "Alice" }] };
     const usersRefBefore = original.users;
@@ -130,6 +276,25 @@ describe("applyPatch copy-on-write", () => {
       { __dom_id: "a", name: "Alice" },
       { __dom_id: "b", name: "Bob" },
     ]);
+  });
+
+  it("preserves previous arrays for conditional stream limits", () => {
+    for (const [id, expected] of [
+      ["a", ["a", "b"]],
+      ["c", ["b", "c"]],
+    ]) {
+      const original = { users: [{ __dom_id: "a" }, { __dom_id: "b" }] };
+      const previous = original.users;
+      const result = applyPatch(original, [
+        { op: "upsert", path: "/users/-", value: { __dom_id: id } },
+        { op: "limit", path: "/users", value: { on_insert: id } },
+        { op: "limit", path: "/users", value: -2 },
+      ]);
+
+      expect(result.users.map((item) => item.__dom_id)).toEqual(expected);
+      expect(result.users).not.toBe(previous);
+      expect(previous.map((item) => item.__dom_id)).toEqual(["a", "b"]);
+    }
   });
 
   it("keeps untouched top-level keys reference-identical", () => {

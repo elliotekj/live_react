@@ -63,6 +63,10 @@ defmodule User do
 end
 ```
 
+Do not use `__proto__` as a top-level prop or stream name. React's element
+creation treats that name as an object prototype instead of a prop. Nested
+maps may contain an `__proto__` key.
+
 Requiring this explicitly is what keeps a struct from leaking fields nobody
 meant to send to the browser. It is the one breaking change in 2.0 — see
 [Upgrading to 2.0](upgrading-to-2.0.md).
@@ -138,7 +142,9 @@ export default function Messages({ messages }) {
 ```
 
 Each item carries the `__dom_id` LiveView assigned to it, which is a stable key
-for React.
+for React. Map items retain their fields, except that `__dom_id` always contains
+the LiveView ID. Non-map items are represented as `{value, __dom_id}`, with the
+original encoded value under `value`.
 
 The stream operations map onto their LiveView counterparts:
 
@@ -149,6 +155,11 @@ The stream operations map onto their LiveView counterparts:
 | `stream_delete/3`                          | Removes the item with that dom id         |
 | `stream/4` with `reset: true`              | Empties the array before applying inserts |
 | `:limit`                                   | Truncates the array to the limit          |
+
+Stream limits apply when an item is inserted; updating an existing item does not
+trim the stream. During a deployment, browsers still running an older LiveReact
+bundle retain the previous behavior of applying the limit to updates until they
+reload and receive the new bundle.
 
 Because the client holds the stream contents in memory, items stay available to
 React — unlike LiveView streams in HEEx, where the server does not retain them.

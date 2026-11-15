@@ -21,15 +21,8 @@ defmodule LiveReact.MixProject do
 
   # Run "mix help compile.app" to learn about applications.
   def application do
-    conditionals =
-      case Application.get_env(:live_react, :ssr_module) do
-        # Needed to use :httpc.request
-        LiveReact.SSR.ViteJS -> [:inets]
-        _ -> []
-      end
-
     [
-      extra_applications: [:logger] ++ conditionals
+      extra_applications: [:logger, :inets]
     ]
   end
 
@@ -44,7 +37,7 @@ defmodule LiveReact.MixProject do
       {:phoenix_ecto, "~> 4.0", optional: true},
       {:phoenix, ">= 1.7.0"},
       {:phoenix_html, ">= 3.3.1"},
-      {:phoenix_live_view, ">= 0.18.0"},
+      {:phoenix_live_view, ">= 0.20.0"},
       {:telemetry, "~> 0.4 or ~> 1.0"},
       {:credo, "~> 1.7", only: [:dev, :test]},
       {:ex_doc, "~> 0.19", only: :dev, runtime: false},

@@ -3,14 +3,17 @@
   "version": "0.1.0",
   "description": "E2E reactivity from React and LiveView",
   "license": "MIT",
-  "module": "./assets/js/live_react/index.js",
+  "module": "./assets/js/live_react/index.mjs",
   "exports": {
     ".": {
       "import": "./assets/js/live_react/index.mjs",
       "types": "./assets/js/live_react/index.d.mts"
     },
     "./server": "./assets/js/live_react/server.mjs",
-    "./vite-plugin": "./assets/js/live_react/vite-plugin.js"
+    "./vite-plugin": {
+      "types": "./assets/js/live_react/vite-plugin.d.cts",
+      "default": "./assets/js/live_react/vite-plugin.js"
+    }
   },
   "author": "Baptiste Chaleil <hello@mrdotb.com>",
   "repository": {
@@ -24,15 +27,17 @@
     "assets/js/live_react/*"
   ],
   "devDependencies": {
+    "@types/react": "^19.3.0",
     "jsdom": "^31.0.1",
     "prettier": "^3.10.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   },
   "scripts": {
     "format": "npx prettier --write .",
-    "test": "vitest run",
+    "test": "vitest run && tsc -p test/typescript/tsconfig.json",
     "test:watch": "vitest --watch"
   }
 }

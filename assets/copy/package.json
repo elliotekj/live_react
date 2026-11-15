@@ -2,12 +2,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host -l warn",
+    "dev": "vite -l warn",
     "build": "tsc && vite build",
     "build-server": "tsc && vite build --ssr js/server.js --out-dir ../priv/react-components --minify && echo '{\"type\": \"module\" } ' > ../priv/react-components/package.json"
   },
   "devDependencies": {
     "@tailwindcss/forms": "^0.5.11",
+    "@tailwindcss/postcss": "^4.3.5",
     "@tailwindcss/vite": "^4.3.5",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

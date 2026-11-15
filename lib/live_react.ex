@@ -37,6 +37,23 @@ defmodule LiveReact do
 
   @ssr_default Application.compile_env(:live_react, :ssr, true)
   @diff_default Application.compile_env(:live_react, :enable_props_diff, true)
+  # LiveView changed insert order without changing the tuple shape.
+  @reverse_stream_inserts LiveStream.new(:live_react_probe, make_ref(), [%{id: 1}, %{id: 2}], [])
+                          |> Map.fetch!(:inserts)
+                          |> hd()
+                          |> elem(2)
+                          |> Map.fetch!(:id)
+                          |> Kernel.==(2)
+  @deduplicate_stream_inserts LiveStream.new(
+                                :live_react_probe,
+                                make_ref(),
+                                [%{id: 1}, %{id: 1}],
+                                []
+                              )
+                              |> Map.put(:consumable?, true)
+                              |> Enum.to_list()
+                              |> length()
+                              |> Kernel.==(1)
 
   @doc """
   Renders a React component.
@@ -82,12 +99,14 @@ defmodule LiveReact do
     <div
       id={assigns[:id] || id(@__component_name)}
       data-name={@__component_name}
-      data-props={"#{Patch.encode_object(Encoder.encode(@props, []))}"}
+      data-props={"#{Patch.encode_object(@props)}"}
       data-props-diff={"#{@props_diff}"}
       data-streams-diff={"#{@streams_diff}"}
+      data-stream-names={"#{@stream_names |> json}"}
       data-slots={"#{@slots |> Slots.base_encode_64 |> json}"}
       data-ssr={is_map(@ssr_render)}
       data-use-diff={@use_diff |> to_string()}
+      data-props-full={@full_props |> to_string()}
       phx-update="ignore"
       phx-hook="ReactHook"
       class={@class}
@@ -115,6 +134,7 @@ defmodule LiveReact do
       init: init,
       dead: dead,
       diff: Map.get(assigns, :diff, @diff_default),
+      mode_changed: not init and key_changed(assigns, :diff),
       streams_diff: Enum.any?(assigns, fn {_k, v} -> match?(%LiveStream{}, v) end),
       ssr: init and dead and Map.get(assigns, :ssr, @ssr_default)
     }
@@ -122,22 +142,29 @@ defmodule LiveReact do
 
   # Builds the assigns consumed by the template: props, diffs, slots and SSR output.
   defp prepare_assigns(assigns, flags) do
+    changed_assigns = Enum.filter(assigns, fn {k, _v} -> key_changed(assigns, k) end)
+
     base_assigns =
-      if flags.diff do
-        Enum.filter(assigns, fn {k, _v} -> key_changed(assigns, k) end)
+      if flags.diff and not flags.mode_changed do
+        changed_assigns
       else
         assigns
       end
 
     {props, _} = extract(base_assigns, assigns, :props)
-    {streams, _} = extract(base_assigns, assigns, :streams)
+    props = props |> Encoder.encode([]) |> Encoder.JSONKeys.validate!()
+    {streams, _} = extract(changed_assigns, assigns, :streams)
+    {all_streams, _} = extract(assigns, assigns, :streams)
     {slots, slots_changed?} = extract(assigns, assigns, :slots)
+
+    stream_patches =
+      Map.new(streams, fn {name, stream} -> {name, generate_stream_patches(name, stream)} end)
 
     props_diff = if flags.diff, do: calculate_props_diff(props, assigns), else: []
 
     streams_diff =
       if flags.streams_diff,
-        do: calculate_streams_diff(streams, flags.init or flags.dead),
+        do: calculate_streams_diff(stream_patches, flags.init or flags.dead),
         else: []
 
     assigns
@@ -146,26 +173,35 @@ defmodule LiveReact do
     |> Map.put(:props, props)
     |> Map.put(:props_diff, Patch.serialize(props_diff))
     |> Map.put(:streams_diff, Patch.serialize(streams_diff))
+    |> Map.put(:stream_names, Enum.map(Map.keys(all_streams), &to_string/1))
     |> Map.put(:use_diff, flags.diff)
+    |> Map.put(:full_props, full_props?(flags))
     |> Map.put(:slots, if(slots_changed?, do: Slots.rendered_slot_map(slots), else: %{}))
-    |> put_ssr_render(flags)
+    |> put_ssr_render(flags, stream_patches)
     |> mark_computed_changed(flags, slots_changed?)
   end
 
-  defp put_ssr_render(assigns, flags) do
-    Map.put(assigns, :ssr_render, if(flags.ssr, do: ssr_render(assigns), else: nil))
+  defp put_ssr_render(assigns, flags, streams) do
+    Map.put(assigns, :ssr_render, if(flags.ssr, do: ssr_render(assigns, streams), else: nil))
   end
+
+  defp full_props?(flags),
+    do: flags.init or flags.dead or not flags.diff or flags.mode_changed
 
   # Marks the assigns we computed ourselves as changed so LiveView diffs them.
   defp mark_computed_changed(assigns, flags, slots_changed?) do
-    full_props? = flags.init or flags.dead or not flags.diff
+    full_props? = full_props?(flags)
 
     computed_changed = %{
       props: full_props?,
       slots: slots_changed?,
       ssr_render: flags.ssr,
+      __component_name: flags.init or key_changed(assigns, :name),
+      use_diff: flags.init or flags.mode_changed,
+      full_props: true,
       props_diff: not full_props?,
-      streams_diff: flags.streams_diff
+      streams_diff: flags.streams_diff,
+      stream_names: true
     }
 
     update_in(assigns.__changed__, fn
@@ -184,20 +220,23 @@ defmodule LiveReact do
           []
 
         true ->
-          [%{op: "replace", path: "/#{k}", value: Encoder.encode(new_value, [])}]
+          [%{op: "replace", path: "/#{escape_pointer(k)}", value: new_value}]
+
+        %LiveStream{} ->
+          [%{op: "replace", path: "/#{escape_pointer(k)}", value: new_value}]
 
         old_value ->
+          old_value = old_value |> Encoder.encode([]) |> Encoder.JSONKeys.validate!()
+
           Jsonpatch.diff(old_value, new_value,
-            ancestor_path: "/#{k}",
-            prepare_map: fn
-              struct when is_struct(struct) -> Encoder.encode(struct, [])
-              rest -> rest
-            end,
+            ancestor_path: "/#{escape_pointer(k)}",
             object_hash: &object_hash/1
           )
       end
     end)
-    |> then(fn diff -> [%{op: "test", path: "", value: :rand.uniform(10_000_000)} | diff] end)
+    |> then(fn diff ->
+      [%{op: "test", path: "", value: :erlang.unique_integer([:positive])} | diff]
+    end)
   end
 
   defp object_hash(%{id: id}), do: id
@@ -209,55 +248,94 @@ defmodule LiveReact do
 
   defp calculate_streams_diff(streams, true) do
     # for initial render, we want to reset all streams, and then apply the diffs
-    init = Enum.map(streams, fn {k, _} -> %{op: "replace", path: "/#{k}", value: []} end)
-    diffs = Enum.flat_map(streams, fn {k, stream} -> generate_stream_patches(k, stream) end)
+    init =
+      Enum.map(streams, fn {k, _} ->
+        %{op: "replace", path: "/#{escape_pointer(k)}", value: []}
+      end)
+
+    diffs = Enum.flat_map(streams, fn {_k, patches} -> patches end)
     init ++ diffs
   end
 
   defp calculate_streams_diff(streams, false) do
     streams
-    |> Enum.flat_map(fn {k, stream} -> generate_stream_patches(k, stream) end)
-    |> then(fn diff -> [%{op: "test", path: "", value: :rand.uniform(10_000_000)} | diff] end)
+    |> Enum.flat_map(fn {_k, patches} -> patches end)
+    |> then(fn diff ->
+      [%{op: "test", path: "", value: :erlang.unique_integer([:positive])} | diff]
+    end)
   end
 
   # Generates JSON patch operations for a single LiveStream's changes.
   defp generate_stream_patches(stream_name, %LiveStream{} = stream) do
+    stream_path = "/#{escape_pointer(stream_name)}"
     patches = []
 
     patches =
       if stream.reset?,
-        do: [%{op: "replace", path: "/#{stream_name}", value: []} | patches],
+        do: [%{op: "replace", path: stream_path, value: []} | patches],
         else: patches
 
     patches =
       Enum.reduce(stream.deletes, patches, fn dom_id, patches ->
-        [%{op: "remove", path: "/#{stream_name}/$$#{dom_id}"} | patches]
+        [%{op: "remove", path: "#{stream_path}/$$#{escape_pointer(dom_id)}"} | patches]
       end)
 
-    # Reversed - inserts at -1 should be correctly ordered, inserts at 0 should be reversed
-    # see https://hexdocs.pm/phoenix_live_view/Phoenix.LiveView.html#stream/4 :at option
     stream.inserts
-    |> Enum.reverse()
-    |> Enum.reduce(patches, fn {dom_id, at, item, limit, update_only}, patches ->
-      item = Map.put(Encoder.encode(item, []), :__dom_id, dom_id)
-
-      patches =
-        if update_only,
-          do: [%{op: "replace", path: "/#{stream_name}/$$#{dom_id}", value: item} | patches],
-          else: [
-            %{
-              op: "upsert",
-              path: "/#{stream_name}/#{if at == -1, do: "-", else: at}",
-              value: item
-            }
-            | patches
-          ]
-
-      if limit,
-        do: [%{op: "limit", path: "/#{stream_name}", value: limit} | patches],
-        else: patches
+    |> ordered_stream_inserts()
+    |> Enum.reduce(patches, fn insert, patches ->
+      [stream_insert_patch(stream_path, insert) | patches]
     end)
     |> Enum.reverse()
+  end
+
+  defp ordered_stream_inserts(inserts) do
+    inserts =
+      if @deduplicate_stream_inserts do
+        # Phoenix renders the newest item but uses the oldest insert's options.
+        oldest = Map.new(inserts, &{elem(&1, 0), &1})
+
+        inserts
+        |> Enum.uniq_by(&elem(&1, 0))
+        |> Enum.map(fn insert ->
+          oldest |> Map.fetch!(elem(insert, 0)) |> put_elem(2, elem(insert, 2))
+        end)
+      else
+        inserts
+      end
+
+    if @reverse_stream_inserts, do: Enum.reverse(inserts), else: inserts
+  end
+
+  defp stream_insert_patch(path, {dom_id, at, item, limit}),
+    do: stream_insert_patch(path, {dom_id, at, item, limit, false})
+
+  defp stream_insert_patch(path, {dom_id, _at, item, _limit, true}) do
+    %{
+      op: "replace",
+      path: "#{path}/$$#{escape_pointer(dom_id)}",
+      value: encode_stream_item(item, dom_id)
+    }
+  end
+
+  defp stream_insert_patch(path, {dom_id, at, item, limit, _update_only}) do
+    item = encode_stream_item(item, dom_id)
+    path = "#{path}/#{if at == -1, do: "-", else: at}"
+
+    if limit do
+      %{op: "upsert_limit", path: path, value: %{item: item, limit: limit}}
+    else
+      %{op: "upsert", path: path, value: item}
+    end
+  end
+
+  defp encode_stream_item(item, dom_id) do
+    item
+    |> Encoder.encode([])
+    |> case do
+      value when is_map(value) -> value |> Map.delete("__dom_id") |> Map.put(:__dom_id, dom_id)
+      value -> %{value: value, __dom_id: dom_id}
+    end
+    |> Encoder.JSONKeys.validate!()
   end
 
   # `iterable` is the (possibly diff-filtered) collection of assigns to bucket by `type`.
@@ -284,11 +362,58 @@ defmodule LiveReact do
   defp key_changed(%{__changed__: nil}, _key), do: true
   defp key_changed(%{__changed__: changed}, key), do: changed[key] != nil
 
-  defp ssr_render(assigns) do
+  defp escape_pointer(value),
+    do: value |> to_string() |> String.replace("~", "~0") |> String.replace("/", "~1")
+
+  defp initial_stream_values(streams) do
+    Map.new(streams, fn {name, patches} ->
+      items = Enum.reduce(patches, [], &apply_initial_stream_patch/2)
+
+      {name, items}
+    end)
+  end
+
+  defp apply_initial_stream_patch(%{op: "upsert", path: path, value: item}, items) do
+    case Enum.find_index(items, &(&1.__dom_id == item.__dom_id)) do
+      nil ->
+        index = path |> String.split("/") |> List.last()
+        index = if index == "-", do: length(items), else: String.to_integer(index)
+        List.insert_at(items, if(index < 0, do: max(length(items) + index, 0), else: index), item)
+
+      index ->
+        List.replace_at(items, index, item)
+    end
+  end
+
+  defp apply_initial_stream_patch(
+         %{op: "upsert_limit", path: path, value: %{item: item, limit: limit}},
+         items
+       ) do
+    exists? = Enum.any?(items, &(&1.__dom_id == item.__dom_id))
+    updated = apply_initial_stream_patch(%{op: "upsert", path: path, value: item}, items)
+    if exists?, do: updated, else: Enum.take(updated, limit)
+  end
+
+  defp apply_initial_stream_patch(%{op: "replace", value: []}, _items), do: []
+
+  defp apply_initial_stream_patch(%{op: "replace", value: item}, items) do
+    case Enum.find_index(items, &(&1.__dom_id == item.__dom_id)) do
+      nil -> items
+      index -> List.replace_at(items, index, item)
+    end
+  end
+
+  defp apply_initial_stream_patch(%{op: "limit", value: limit}, items),
+    do: Enum.take(items, limit)
+
+  defp apply_initial_stream_patch(%{op: "remove"}, items), do: items
+
+  defp ssr_render(assigns, streams) do
     try do
       name = Map.get(assigns, :name)
 
-      SSR.render(name, Encoder.encode(assigns.props, []), assigns.slots)
+      props = Map.merge(assigns.props, initial_stream_values(streams))
+      SSR.render(name, props, assigns.slots)
     rescue
       SSR.NotConfigured ->
         nil
