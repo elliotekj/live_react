@@ -39,7 +39,135 @@ defmodule LiveReact.EncoderFormTest do
     end
   end
 
+  defmodule Details do
+    use Ecto.Schema
+    @derive Encoder
+    embedded_schema do
+      field(:name, :string)
+    end
+
+    def changeset(details, attrs) do
+      details |> Ecto.Changeset.cast(attrs, [:name]) |> Ecto.Changeset.validate_required([:name])
+    end
+  end
+
+  defmodule Profile do
+    use Ecto.Schema
+    @derive Encoder
+    embedded_schema do
+      embeds_one(:details, Details, on_replace: :delete)
+      embeds_many(:items, Details, on_replace: :delete)
+    end
+  end
+
+  defmodule Post do
+    use Ecto.Schema
+    @derive {Encoder, except: [:secret]}
+    schema "posts" do
+      field(:title, :string)
+      field(:secret, :string)
+      belongs_to(:author, Author)
+    end
+  end
+
+  defmodule Author do
+    use Ecto.Schema
+    @derive {Encoder, except: [:secret]}
+    schema "authors" do
+      field(:name, :string)
+      field(:secret, :string)
+      has_many(:posts, Post)
+    end
+  end
+
   describe "Phoenix.HTML.Form encoding — Ecto changeset backed" do
+    test "represents unloaded associations as nil without exposing excluded fields" do
+      author = %Author{name: "Ada", secret: "private"}
+      encoded = author |> change() |> FormData.to_form(as: "author") |> Encoder.encode([])
+
+      assert encoded.values.posts == nil
+      refute Map.has_key?(encoded.values, :secret)
+    end
+
+    test "honors an explicit request not to nilify unloaded associations" do
+      form = %Author{name: "Ada"} |> change() |> FormData.to_form(as: "author")
+
+      assert_raise Protocol.UndefinedError, fn ->
+        Encoder.encode(form, nilify_not_loaded: false)
+      end
+    end
+
+    test "preserves loaded associations and nested unloaded values" do
+      post = %Post{title: "Hello", secret: "private"}
+
+      for {posts, expected} <- [{[], []}, {[post], [%{title: "Hello", author: nil}]}] do
+        author = %Author{name: "Ada", posts: posts}
+        encoded = author |> change() |> FormData.to_form(as: "author") |> Encoder.encode([])
+
+        assert length(encoded.values.posts) == length(expected)
+
+        Enum.zip(encoded.values.posts, expected)
+        |> Enum.each(fn {value, fields} ->
+          assert Map.take(value, Map.keys(fields)) == fields
+          refute Map.has_key?(value, :secret)
+        end)
+      end
+    end
+
+    test "encodes an unchanged changeset with no params" do
+      encoded =
+        %Simple{name: "Ada"} |> change() |> FormData.to_form(as: "simple") |> Encoder.encode([])
+
+      assert encoded.values.name == "Ada"
+      assert encoded.valid
+    end
+
+    test "includes programmatically added embedded records" do
+      changeset = %Profile{} |> change() |> put_embed(:items, [%Details{name: "Added"}])
+      encoded = changeset |> FormData.to_form(as: "profile") |> Encoder.encode([])
+      assert [%{name: "Added"}] = encoded.values.items
+    end
+
+    test "preserves unchanged embedded records" do
+      profile = %Profile{items: [%Details{name: "Kept"}]}
+      encoded = profile |> change() |> FormData.to_form(as: "profile") |> Encoder.encode([])
+      assert [%{name: "Kept"}] = encoded.values.items
+      assert encoded.errors == %{}
+    end
+
+    test "keeps nested errors aligned with retained items when removing an embedded record" do
+      old_id = Ecto.UUID.generate()
+      keep_id = Ecto.UUID.generate()
+
+      profile = %Profile{
+        items: [%Details{id: old_id, name: "Old"}, %Details{id: keep_id, name: "Keep"}]
+      }
+
+      invalid = %Details{id: keep_id, name: "Keep"} |> change() |> add_error(:name, "invalid")
+      changeset = profile |> change() |> put_embed(:items, [invalid, %Details{name: "New"}])
+      encoded = changeset |> FormData.to_form(as: "profile") |> Encoder.encode([])
+
+      assert Enum.map(encoded.values.items, & &1.name) == ["Keep", "New"]
+      assert encoded.errors == %{items: [%{name: ["invalid"]}, nil]}
+      refute encoded.valid
+    end
+
+    test "encodes an explicitly removed embedded record" do
+      profile = %Profile{details: %Details{name: "Ada"}}
+      changeset = profile |> cast(%{"details" => nil}, []) |> cast_embed(:details)
+      assert changeset.changes.details == nil
+
+      encoded = changeset |> FormData.to_form(as: "profile") |> Encoder.encode([])
+      assert encoded.values.details == nil
+      assert encoded.errors == %{}
+    end
+
+    test "keeps errors for an invalid embedded record" do
+      changeset = %Profile{} |> cast(%{"details" => %{"name" => ""}}, []) |> cast_embed(:details)
+      encoded = changeset |> FormData.to_form(as: "profile") |> Encoder.encode([])
+      assert encoded.errors == %{details: %{name: ["can't be blank"]}}
+    end
+
     test "encodes form with simple values" do
       simple = %Simple{}
 
@@ -92,9 +220,39 @@ defmodule LiveReact.EncoderFormTest do
                score: ["must be less than or equal to 100"]
              }
     end
+
+    test "preserves multiple errors on a changeset field" do
+      changeset = %Simple{} |> change() |> add_error(:name, "first") |> add_error(:name, "second")
+      encoded = changeset |> FormData.to_form(as: "simple") |> Encoder.encode([])
+      assert encoded.errors.name == ["second", "first"]
+    end
   end
 
   describe "Phoenix.HTML.Form encoding — plain map backed (no Ecto)" do
+    test "marks a form with errors invalid" do
+      form =
+        to_form(%{"email" => "bad"},
+          as: :user,
+          errors: [email: {"invalid", []}],
+          action: :validate
+        )
+
+      encoded = Encoder.encode(form, [])
+      assert encoded.errors == %{email: ["invalid"]}
+      refute encoded.valid
+    end
+
+    test "preserves multiple errors on a map field" do
+      form =
+        to_form(%{"email" => "bad"},
+          as: :user,
+          errors: [email: {"first", []}, email: {"second", []}],
+          action: :validate
+        )
+
+      assert Encoder.encode(form, []).errors == %{email: ["first", "second"]}
+    end
+
     test "encodes form backed by simple map data" do
       form_data = %{
         "name" => "John Doe",

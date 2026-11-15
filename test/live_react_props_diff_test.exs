@@ -27,6 +27,42 @@ defmodule LiveReactPropsDiffTest do
   end
 
   describe "props_diff functionality" do
+    test "consecutive identical patch operations have different wire values" do
+      patches =
+        for {old, new} <- [
+              {[%{id: 1}, %{id: 2}, %{id: 3}], [%{id: 2}, %{id: 3}]},
+              {[%{id: 2}, %{id: 3}], [%{id: 3}]}
+            ] do
+          :rand.seed(:exsss, {17, 31, 42})
+
+          LiveReact.react(%{name: "List", list: new, __changed__: %{list: old}, ssr: false})
+          |> Phoenix.HTML.Safe.to_iodata()
+          |> IO.iodata_to_binary()
+          |> Floki.parse_fragment!()
+          |> Floki.attribute("data-props-diff")
+          |> List.first()
+        end
+
+      assert [first, second] = patches
+      assert first != second
+      assert LiveReact.Patch.deserialize(first) == [["remove", "/list/0"]]
+      assert LiveReact.Patch.deserialize(second) == [["remove", "/list/0"]]
+    end
+
+    test "escapes top-level prop names in replacement and nested patches" do
+      name = :"items/~active"
+
+      for {old, new, expected} <- [
+            {true, 42, [["replace", "/items~1~0active", 42]]},
+            {%{count: 1}, %{count: 2}, [["replace", "/items~1~0active/count", 2]]}
+          ] do
+        react =
+          render_react_assigns(%{name => new, :__changed__ => %{name => old}, :ssr => false})
+
+        assert react.props_diff == expected
+      end
+    end
+
     test "initial render has empty props_diff and use_diff true" do
       assigns = %{username: "John", age: 30, socket: nil, __changed__: nil}
 
@@ -101,6 +137,21 @@ defmodule LiveReactPropsDiffTest do
       @moduledoc false
       @derive LiveReact.Encoder
       defstruct [:name, :age]
+    end
+
+    defmodule RestrictedUser do
+      @derive [Jason.Encoder, {LiveReact.Encoder, only: [:name]}]
+      defstruct [:name, :secret]
+    end
+
+    test "nested added values respect struct field restrictions" do
+      user = %RestrictedUser{name: "Ada", secret: "PRIVATE"}
+
+      for {old, new} <- [{[], [[user]]}, {%{}, %{group: [user]}}] do
+        react = render_react_assigns(%{items: new, __changed__: %{items: old}})
+        refute inspect(react.props_diff) =~ "PRIVATE"
+        assert inspect(react.props_diff) =~ "Ada"
+      end
     end
 
     test "for structs uses LiveReact.Encoder to convert to map" do

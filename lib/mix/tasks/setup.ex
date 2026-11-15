@@ -8,13 +8,14 @@ defmodule Mix.Tasks.LiveReact.Setup do
 
   @impl Mix.Task
   def run(_args) do
-    Mix.Project.deps_paths(depth: 1)
-    |> Map.fetch!(:live_react)
-    |> Path.join("assets/copy/**/{*.*}")
+    source =
+      Mix.Project.deps_paths(depth: 1) |> Map.fetch!(:live_react) |> Path.join("assets/copy")
+
+    source
+    |> Path.join("**/{*.*}")
     |> Path.wildcard(match_dot: true)
     |> Enum.each(fn full_path ->
-      [_beginning, relative_path] = String.split(full_path, "copy", parts: 2)
-      new_path = "assets" <> relative_path
+      new_path = Path.join("assets", Path.relative_to(full_path, source))
 
       case File.exists?(new_path) do
         true ->

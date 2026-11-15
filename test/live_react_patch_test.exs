@@ -94,6 +94,22 @@ defmodule LiveReactPatchTest do
   end
 
   describe "operations" do
+    test "round-trips a limited upsert" do
+      patches = [
+        %{
+          op: "upsert_limit",
+          path: "/items/-",
+          value: %{item: %{__dom_id: "item-1"}, limit: -3}
+        }
+      ]
+
+      assert Patch.serialize(patches) |> Patch.deserialize() == [
+               ["upsert", "/items/-", %{"__dom_id" => "item-1"}],
+               ["limit", "/items", %{"on_insert" => "item-1"}],
+               ["limit", "/items", -3]
+             ]
+    end
+
     test "round-trips an empty patch list" do
       assert serialize_deserialize([]) == []
     end

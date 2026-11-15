@@ -21,8 +21,10 @@ export interface LiveProps {
   uploadTo: (target: string, name: string, files: FileList | File[]) => void;
 }
 
-export interface LinkProps
-  extends React.AnchorHTMLAttributes<HTMLAnchorElement> {
+export interface LinkProps extends Omit<
+  React.AnchorHTMLAttributes<HTMLAnchorElement>,
+  "href"
+> {
   /** Uses traditional browser navigation to the new location. This means the whole page is reloaded. */
   href?: string | null;
   /** Patches the current LiveView. The handle_params callback will be invoked with minimum content sent over the wire. */
@@ -36,3 +38,11 @@ export interface LinkProps
 
 export function useLiveReact(): LiveProps;
 export function Link(props: LinkProps): React.ReactElement;
+export function getHooks(components: Record<string, React.ElementType>): {
+  ReactHook: {
+    mounted(): void;
+    updated(): void;
+    reconnected(): void;
+    destroyed(): void;
+  };
+};

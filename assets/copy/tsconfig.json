@@ -23,8 +23,8 @@
     "noFallthroughCasesInSwitch": true,
 
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./react-components/*"]
     }
   },
-  "include": ["js/*", "react/**/*"]
+  "include": ["js/**/*", "react-components/**/*"]
 }

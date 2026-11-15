@@ -3,6 +3,57 @@ defmodule LiveReact.EncoderTest do
 
   alias LiveReact.Encoder
 
+  defmodule Ambiguous do
+    defstruct [:id]
+  end
+
+  defimpl LiveReact.Encoder, for: Ambiguous do
+    def encode(_value, _opts), do: %{"x" => 1, :x => 2}
+  end
+
+  defp render(assigns) do
+    assigns
+    |> LiveReact.react()
+    |> Phoenix.HTML.Safe.to_iodata()
+    |> IO.iodata_to_binary()
+  end
+
+  test "rejects ambiguous JSON keys in snapshots and patches" do
+    for bad <- [
+          %{"x" => 1, :x => 2},
+          %{"1" => 1, 1 => 2},
+          %{"nil" => 1, nil => 2},
+          %{"outer" => [%{"x" => 1, :x => 2}]}
+        ] do
+      assert_raise ArgumentError, ~r/ambiguous JSON object key/, fn ->
+        render(%{name: "Demo", data: bad, __changed__: nil, ssr: false})
+      end
+
+      assert_raise ArgumentError, ~r/ambiguous JSON object key/, fn ->
+        render(%{name: "Demo", data: bad, __changed__: %{data: %{}}, ssr: false})
+      end
+    end
+  end
+
+  test "keeps distinct JSON keys when an empty string and nil coexist" do
+    html = render(%{name: "Demo", data: %{nil => 1, "" => 2}, __changed__: nil, ssr: false})
+    assert LiveReact.Test.get_react(html).props["data"] == %{"nil" => 1, "" => 2}
+  end
+
+  test "rejects ambiguous keys returned by custom encoders in props and streams" do
+    item = %Ambiguous{id: 1}
+
+    assert_raise ArgumentError, ~r/ambiguous JSON object key/, fn ->
+      render(%{name: "Demo", data: [item], __changed__: nil, ssr: false})
+    end
+
+    stream = Phoenix.LiveView.LiveStream.new(:items, make_ref(), [item], [])
+
+    assert_raise ArgumentError, ~r/ambiguous JSON object key/, fn ->
+      render(%{name: "Demo", items: stream, __changed__: nil, ssr: false})
+    end
+  end
+
   describe "primitive types" do
     test "encodes integers, floats, strings, booleans, nil, atoms" do
       assert Encoder.encode(42, []) == 42

@@ -1,4 +1,5 @@
 function hotUpdateType(path) {
+  if (!path) return null;
   if (path.endsWith("css")) return "css-update";
   if (path.endsWith("js")) return "js-update";
   return null;
@@ -10,35 +11,52 @@ const jsonResponse = (res, statusCode, data) => {
   res.end(JSON.stringify(data));
 };
 
-// Custom JSON parsing middleware
-const jsonMiddleware = (req, res, next) => {
-  let data = "";
+const jsonMiddleware = (req, res, maxBodyBytes, next) => {
+  let size = 0;
+  let finished = false;
+  const chunks = [];
 
-  // Listen for data event to collect the chunks of data
   req.on("data", (chunk) => {
-    data += chunk;
+    if (finished) return;
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += bytes.length;
+    if (size > maxBodyBytes) {
+      finished = true;
+      chunks.length = 0;
+      jsonResponse(res, 413, { error: "Request body too large" });
+      return;
+    }
+    chunks.push(bytes);
   });
 
-  // Listen for end event to finish data collection
   req.on("end", () => {
+    if (finished) return;
+    finished = true;
     try {
-      // Parse the collected data as JSON
-      req.body = JSON.parse(data);
-      next(); // Proceed to the next middleware
+      req.body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      next();
     } catch (error) {
-      // Handle JSON parse error
       jsonResponse(res, 400, { error: "Invalid JSON" });
     }
   });
 
-  // Handle error event
+  req.on("aborted", () => {
+    finished = true;
+    chunks.length = 0;
+  });
   req.on("error", (err) => {
+    if (finished) return;
+    finished = true;
     console.error(err);
     jsonResponse(res, 500, { error: "Internal Server Error" });
   });
 };
 
 function liveReactPlugin(opts = {}) {
+  const maxBodyBytes = opts.maxBodyBytes ?? 10 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) {
+    throw new TypeError("maxBodyBytes must be a positive integer");
+  }
   return {
     name: "live-react",
     handleHotUpdate({ file, modules, server, timestamp }) {
@@ -81,7 +99,21 @@ function liveReactPlugin(opts = {}) {
       const entrypoint = opts.entrypoint || "./js/server.js";
       server.middlewares.use(function liveReactMiddleware(req, res, next) {
         if (req.method == "POST" && req.url.split("?", 1)[0] === path) {
-          jsonMiddleware(req, res, async () => {
+          if (req.headers.origin !== undefined) {
+            jsonResponse(res, 403, { error: "Origin not allowed" });
+            req.resume();
+            return;
+          }
+          if (
+            !/^application\/json(?:\s*;|\s*$)/i.test(
+              req.headers["content-type"] || "",
+            )
+          ) {
+            jsonResponse(res, 415, { error: "Expected application/json" });
+            req.resume();
+            return;
+          }
+          jsonMiddleware(req, res, maxBodyBytes, async () => {
             try {
               const render = (await server.ssrLoadModule(entrypoint)).render;
               const html = await render(
@@ -91,8 +123,14 @@ function liveReactPlugin(opts = {}) {
               );
               res.end(html);
             } catch (e) {
-              server.ssrFixStacktrace(e);
-              jsonResponse(res, 500, { error: e });
+              if (e != null) server.ssrFixStacktrace(e);
+              jsonResponse(res, 500, {
+                error: {
+                  message: String(e?.message ?? e),
+                  loc: e?.loc,
+                  frame: e?.frame,
+                },
+              });
             }
           });
         } else {

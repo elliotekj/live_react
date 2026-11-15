@@ -27,6 +27,10 @@ defmodule LiveReact.Patch do
   `remove` omits `<value>`. The nonce marker uses `n<digits>` and exists only
   to force LiveView to send a changed attribute.
 
+  A limited stream upsert is serialized as an upsert, an object-valued limit
+  marker, and a numeric limit. Older clients ignore the marker and retain their
+  previous limit behavior; current clients use it to limit only new inserts.
+
   Value tags:
 
   | Tag | Value |
@@ -94,6 +98,20 @@ defmodule LiveReact.Patch do
   end
 
   defp serialize_op(%{op: "test", path: "", value: nonce}), do: ["n", to_string(nonce)]
+
+  defp serialize_op(%{op: "upsert_limit", path: path, value: %{item: item, limit: limit}}) do
+    stream_path = path |> String.split("/") |> Enum.drop(-1) |> Enum.join("/")
+
+    [
+      serialize_op(%{op: "upsert", path: path, value: item}),
+      serialize_op(%{
+        op: "limit",
+        path: stream_path,
+        value: %{on_insert: item.__dom_id}
+      }),
+      serialize_op(%{op: "limit", path: stream_path, value: limit})
+    ]
+  end
 
   defp serialize_op(%{op: op, path: path, value: value}) do
     path = encode_path(path)

@@ -99,7 +99,13 @@ let liveSocket = new LiveSocket("/live", Socket, {
 ...
 ```
 
-7. For tailwind support, make some addition to `content` in the `assets/tailwind.config.js` file
+7. For Tailwind CSS 4, add the React component directory to the sources in `assets/css/app.css`:
+
+```css
+@source "../react-components";
+```
+
+This is needed when the stylesheet uses `source(none)` with explicit sources, as in a new Phoenix project. For an existing project using Tailwind CSS 3, add the React files to `content` in `assets/tailwind.config.js` instead:
 
 ```javascript
 content: [
@@ -270,7 +276,7 @@ and add these scripts used by watcher and `mix assets.build` command
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host -l warn",
+    "dev": "vite -l warn",
     "build": "tsc && vite build",
     "build-server": "tsc && vite build --ssr js/server.js --out-dir ../priv/react-components --minify && echo '{\"type\": \"module\" } ' > ../priv/react-components/package.json"
   }

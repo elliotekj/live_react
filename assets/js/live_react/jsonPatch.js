@@ -2,6 +2,19 @@ function unescapePathComponent(path) {
   return path.replace(/~1/g, "/").replace(/~0/g, "~");
 }
 
+function hasOwn(obj, key) {
+  return obj != null && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function setOwn(obj, key, value) {
+  Object.defineProperty(obj, key, {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+}
+
 function resolvePathComponent(component, arrayObj) {
   if (!component.startsWith("$$")) {
     return component;
@@ -9,7 +22,11 @@ function resolvePathComponent(component, arrayObj) {
 
   const targetId = component.substring(2);
   const index = arrayObj.findIndex(
-    (item) => item && typeof item === "object" && item.__dom_id == targetId,
+    (item) =>
+      item &&
+      typeof item === "object" &&
+      hasOwn(item, "__dom_id") &&
+      item.__dom_id == targetId,
   );
 
   if (index === -1) {
@@ -53,10 +70,11 @@ export function getValueByPointer(document, pointer) {
         if (resolved === null) return undefined;
         resolvedKey = resolved;
       }
-      obj =
-        obj[resolvedKey === "-" ? obj.length - 1 : parseInt(resolvedKey, 10)];
+      resolvedKey =
+        resolvedKey === "-" ? obj.length - 1 : parseInt(resolvedKey, 10);
+      obj = hasOwn(obj, resolvedKey) ? obj[resolvedKey] : undefined;
     } else {
-      obj = obj[resolvedKey];
+      obj = hasOwn(obj, resolvedKey) ? obj[resolvedKey] : undefined;
     }
   }
 
@@ -99,9 +117,10 @@ function applyPatchOperation(document, op, path, value) {
 
     if (Array.isArray(obj)) {
       const index = resolveArrayIndex(key, obj, false);
-      if (index === null) return document;
+      if (index === null || !hasOwn(obj, index)) return document;
       obj = obj[index];
     } else {
+      if (!hasOwn(obj, key)) return document;
       obj = obj[key];
     }
 
@@ -109,6 +128,8 @@ function applyPatchOperation(document, op, path, value) {
   }
 
   const unescapedKey = readPathSegment(path, segmentStart, path.length);
+
+  if (obj == null || typeof obj !== "object") return document;
 
   if (Array.isArray(obj)) {
     const resolvedIndex = resolveArrayIndex(unescapedKey, obj, true);
@@ -126,11 +147,15 @@ function applyPatchOperation(document, op, path, value) {
         obj[index] = value;
         break;
       case "upsert":
-        if (value && typeof value === "object" && "__dom_id" in value) {
+      case "upsert_limit": {
+        const limit = op === "upsert_limit" ? value.limit : null;
+        if (op === "upsert_limit") value = value.item;
+        if (value && typeof value === "object" && hasOwn(value, "__dom_id")) {
           const existingIndex = obj.findIndex(
             (item) =>
               item &&
               typeof item === "object" &&
+              hasOwn(item, "__dom_id") &&
               item.__dom_id === value.__dom_id,
           );
 
@@ -138,11 +163,14 @@ function applyPatchOperation(document, op, path, value) {
             obj[existingIndex] = value;
           } else {
             obj.splice(index, 0, value);
+            if (limit !== null) limitArray(obj, limit);
           }
         } else {
           obj.splice(index, 0, value);
+          if (limit !== null) limitArray(obj, limit);
         }
         break;
+      }
       case "test":
         break;
       case "limit":
@@ -158,7 +186,7 @@ function applyPatchOperation(document, op, path, value) {
     switch (op) {
       case "add":
       case "replace":
-        obj[unescapedKey] = value;
+        setOwn(obj, unescapedKey, value);
         break;
       case "remove":
         delete obj[unescapedKey];
@@ -166,7 +194,9 @@ function applyPatchOperation(document, op, path, value) {
       case "test":
         break;
       case "limit":
-        const targetArray = obj[unescapedKey];
+        const targetArray = hasOwn(obj, unescapedKey)
+          ? obj[unescapedKey]
+          : undefined;
         if (Array.isArray(targetArray)) {
           if (value >= 0) {
             if (value < targetArray.length) targetArray.splice(value);
@@ -183,15 +213,32 @@ function applyPatchOperation(document, op, path, value) {
   return document;
 }
 
+function limitArray(array, limit) {
+  if (limit >= 0) {
+    if (limit < array.length) array.splice(limit);
+  } else {
+    const keepCount = Math.abs(limit);
+    if (keepCount < array.length) array.splice(0, array.length - keepCount);
+  }
+}
+
 function cloneShallow(value) {
   if (Array.isArray(value)) return value.slice();
   if (value && typeof value === "object") return { ...value };
   return value;
 }
 
+function ensureWritableChild(parent, key, owned) {
+  const child = parent[key];
+  if (child && typeof child === "object" && !owned.has(child)) {
+    const clone = cloneShallow(child);
+    owned.add(clone);
+    setOwn(parent, key, clone);
+  }
+}
+
 /**
- * Clones every container from `document` down to (but not including) the
- * value that `path`'s final segment addresses, the first time this patch
+ * Clones containers along `path`, the first time this patch
  * batch touches each one — so the eventual write, wherever in
  * applyPatchOperation's own traversal it lands, always mutates a
  * this-batch-fresh object/array instead of aliasing a value some other
@@ -204,17 +251,10 @@ function cloneShallow(value) {
  * extend the same guarantee to nested paths like `/items/1/name`, where
  * both `document.items` (the array) and `document.items[1]` (the item)
  * need fresh references before the write two levels down.
- *
- * The final segment itself is deliberately left uncloned: cloning the
- * value living there would corrupt append-style inserts (a path ending in
- * `/-`, since there's no existing value at the append index yet), and
- * every other operation either overwrites that slot outright or mutates
- * its already-fresh parent — neither needs the old value pre-cloned.
  */
-function ensureWritablePath(document, path, touchedPaths) {
+function ensureWritablePath(document, path, owned, op) {
   let obj = document;
   let segmentStart = 1;
-  let prefix = "";
 
   while (true) {
     const segmentEnd = path.indexOf("/", segmentStart);
@@ -223,46 +263,67 @@ function ensureWritablePath(document, path, touchedPaths) {
     const key = readPathSegment(path, segmentStart, segmentEnd);
     let resolvedKey = key;
 
+    if (obj == null || typeof obj !== "object") return false;
+
     if (Array.isArray(obj)) {
       const index = resolveArrayIndex(key, obj, false);
       if (index === null) return;
       resolvedKey = index;
     }
 
-    prefix += "/" + resolvedKey;
-
-    if (!touchedPaths.has(prefix)) {
-      touchedPaths.add(prefix);
-      obj[resolvedKey] = cloneShallow(obj[resolvedKey]);
-    }
+    if (!hasOwn(obj, resolvedKey)) return false;
+    ensureWritableChild(obj, resolvedKey, owned);
 
     obj = obj[resolvedKey];
     segmentStart = segmentEnd + 1;
   }
 
-  if (prefix === "") {
-    const key = readPathSegment(path, segmentStart, path.length);
-    const singleSegmentPrefix = "/" + key;
+  if (obj == null || typeof obj !== "object") return false;
 
-    if (!touchedPaths.has(singleSegmentPrefix)) {
-      touchedPaths.add(singleSegmentPrefix);
-      obj[key] = cloneShallow(obj[key]);
-    }
+  if (segmentStart === 1 || op === "limit") {
+    const key = readPathSegment(path, segmentStart, path.length);
+    if (hasOwn(obj, key)) ensureWritableChild(obj, key, owned);
   }
+
+  return true;
 }
 
 export function applyPatch(document, patch) {
   let result = document;
-  const touchedPaths = new Set();
+  let owned = new WeakSet();
 
-  for (const operation of patch) {
+  for (let index = 0; index < patch.length; index++) {
+    let operation = patch[index];
+    const next = patch[index + 1];
+    const limit = patch[index + 2];
+    if (
+      operation.op === "upsert" &&
+      next?.op === "limit" &&
+      next.path === operation.path.slice(0, operation.path.lastIndexOf("/")) &&
+      next.value &&
+      typeof next.value === "object" &&
+      hasOwn(next.value, "on_insert") &&
+      next.value.on_insert === operation.value?.__dom_id &&
+      limit?.op === "limit" &&
+      limit.path === next.path &&
+      typeof limit.value === "number"
+    ) {
+      operation = {
+        op: "upsert_limit",
+        path: operation.path,
+        value: { item: operation.value, limit: limit.value },
+      };
+      index += 2;
+    }
     if (operation.path === "") {
       result = applyOperation(result, operation);
+      owned = new WeakSet();
       continue;
     }
 
-    ensureWritablePath(result, operation.path, touchedPaths);
-    applyOperation(result, operation);
+    if (ensureWritablePath(result, operation.path, owned, operation.op)) {
+      applyOperation(result, operation);
+    }
   }
 
   return result;

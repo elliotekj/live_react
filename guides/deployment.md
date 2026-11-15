@@ -13,7 +13,7 @@ The following steps are needed to deploy to Fly.io. This guide assumes that you'
 mix phx.gen.release --docker
 ```
 
-2. Modify the generated `Dockerfile` to install `curl`, which is used to install `nodejs` (version 19 or greater), and also add a step to install our `npm` dependencies:
+2. Modify the generated `Dockerfile` to install Node.js 24 and the npm dependencies:
 
 ```diff
 # ./Dockerfile
@@ -21,12 +21,16 @@ mix phx.gen.release --docker
 ...
 
 # install build dependencies
-- RUN apt-get update -y && apt-get install -y build-essential git \
-+ RUN apt-get update -y && apt-get install -y build-essential git curl \
-    && apt-get clean && rm -f /var/lib/apt/lists/*_*
+ RUN apt-get update \
+-  && apt-get install -y --no-install-recommends build-essential git \
++  && apt-get install -y --no-install-recommends build-essential git curl \
+   && rm -rf /var/lib/apt/lists/*
 
 + # install nodejs for build stage
-+ RUN curl -fsSL https://deb.nodesource.com/setup_19.x | bash - && apt-get install -y nodejs
++ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
+
+ RUN mix deps.compile
+-RUN mix assets.setup
 
 ...
 
@@ -72,7 +76,7 @@ The following steps are needed to deploy to Fly.io. This guide assumes that you'
 mix phx.gen.release --docker
 ```
 
-2. Modify the generated `Dockerfile` to install `curl`, which is used to install `nodejs` (version 19 or greater), and also add a step to install our `npm` dependencies:
+2. Modify the generated `Dockerfile` to install Node.js 24 and the npm dependencies:
 
 ```diff
 # ./Dockerfile
@@ -80,12 +84,16 @@ mix phx.gen.release --docker
 ...
 
 # install build dependencies
-- RUN apt-get update -y && apt-get install -y build-essential git \
-+ RUN apt-get update -y && apt-get install -y build-essential git curl \
-    && apt-get clean && rm -f /var/lib/apt/lists/*_*
+ RUN apt-get update \
+-  && apt-get install -y --no-install-recommends build-essential git \
++  && apt-get install -y --no-install-recommends build-essential git curl \
+   && rm -rf /var/lib/apt/lists/*
 
 + # install nodejs for build stage
-+ RUN curl -fsSL https://deb.nodesource.com/setup_19.x | bash - && apt-get install -y nodejs
++ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
+
+ RUN mix deps.compile
+-RUN mix assets.setup
 
 ...
 
@@ -100,18 +108,28 @@ COPY assets assets
 # the compiled release and other runtime necessities
 FROM ${RUNNER_IMAGE}
 
-RUN apt-get update -y && \
--  apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates \
-+  apt-get install -y libstdc++6 openssl libncurses5 locales ca-certificates curl \
-   && apt-get clean && rm -f /var/lib/apt/lists/*_*
+ RUN apt-get update \
+-  && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 locales ca-certificates \
++  && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 locales ca-certificates curl \
+   && rm -rf /var/lib/apt/lists/*
 
 + # install nodejs for production environment
-+ RUN curl -fsSL https://deb.nodesource.com/setup_19.x | bash - && apt-get install -y nodejs
++ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
 
 ...
+
+WORKDIR /app
+
+ # Keep npm's local file dependency links and their targets in place.
++COPY --from=builder --chown=nobody:root /app/assets/node_modules /app/assets/node_modules
++COPY --from=builder --chown=nobody:root /app/deps /app/deps
++RUN ln -s assets/node_modules /app/node_modules
++
+ # Copy the release as in the generated Dockerfile.
+ COPY --from=builder --chown=nobody:root /app/_build/${MIX_ENV}/rel/<app_name> ./
 ```
 
-Note: `nodejs` is installed BOTH in the build stage and in the final image. This is because we need `nodejs` to install our `npm` dependencies and also need it when running our app.
+Node.js is needed both to build the assets and to render them in the final image. The server bundle imports npm packages at runtime, so the final image also needs `node_modules`. The `/app/assets` and `/app/deps` paths preserve the relative links created for the local Phoenix and LiveReact packages. The `/app/node_modules` link lets Node find those packages from the release. Replace `<app_name>` with the release name in your generated Dockerfile.
 
 3. Launch your app with the Fly.io CLI:
 
