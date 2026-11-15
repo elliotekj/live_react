@@ -25,7 +25,7 @@ export default defineConfig(({ command }) => {
     },
     resolve: {
       alias: {
-        "@": path.resolve(__dirname, "./react-components"),
+        "@": path.resolve(import.meta.dirname, "./react-components"),
       },
       dedupe: ["react", "react-dom"],
     },
@@ -45,7 +45,7 @@ export default defineConfig(({ command }) => {
       manifest: false, // do not generate manifest.json
       rollupOptions: {
         input: {
-          app: path.resolve(__dirname, "./js/app.js"),
+          app: path.resolve(import.meta.dirname, "./js/app.js"),
         },
         output: {
           // remove hashes to match phoenix way of handling assets

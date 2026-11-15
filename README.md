@@ -35,6 +35,7 @@ React inside Phoenix LiveView.
 - [Development](/guides/development.md)
 - [SSR](/guides/ssr.md)
 - [Upgrading to 2.0](/guides/upgrading-to-2.0.md)
+- [Upgrading to Vite 8](/guides/upgrading-to-vite-8.md)
 
 ## Example
 
